@@ -6,6 +6,9 @@ on:
     - cron: "0 16 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   sandstone-water-report:
     runs-on: ubuntu-latest
@@ -25,5 +28,5 @@ jobs:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          EMAIL_TO: info@heritageharvestranch.com
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
         run: python water_reporter.py --enforce-mountain-9am

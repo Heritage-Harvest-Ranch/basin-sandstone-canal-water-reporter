@@ -24,3 +24,4 @@ Required repository secrets for email:
 - `SMTP_USERNAME`
 - `SMTP_PASSWORD`
 - `EMAIL_FROM` (optional)
+- `EMAIL_TO` (optional, defaults to `info@heritageharvestranch.com` if not set)
