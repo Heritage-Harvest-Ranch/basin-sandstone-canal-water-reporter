@@ -16,6 +16,7 @@ GitHub Actions workflow:
 - `.github/workflows/daily-sandstone-water-report.yml`
 - Scheduled at both `15:00` and `16:00` UTC
 - Script enforces running only when local `America/Denver` hour is 9, so one run is skipped and the 9am MT run proceeds across DST changes
+- Commits updated `data/*.json` snapshots back to the repository when daily data changes
 
 Required repository secrets for email:
 

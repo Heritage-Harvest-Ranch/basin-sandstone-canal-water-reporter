@@ -10,12 +10,14 @@ from email.message import EmailMessage
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.error import URLError
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
 SOURCE_URL = "https://greybullvalleyid.com/water-orders/"
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent / "data"
 MOUNTAIN_TZ = ZoneInfo("America/Denver")
+CARRYOVER_LOOKBACK_DAYS = 2
 
 
 def _normalize_text(value: str) -> str:
@@ -63,8 +65,11 @@ class TableParser(HTMLParser):
 
 
 def fetch_water_orders_html(url: str = SOURCE_URL, timeout: int = 30) -> str:
-    with urlopen(url, timeout=timeout) as response:
-        return response.read().decode("utf-8", errors="replace")
+    try:
+        with urlopen(url, timeout=timeout) as response:
+            return response.read().decode("utf-8", errors="replace")
+    except URLError as error:
+        raise RuntimeError(f"Unable to fetch water orders from {url}: {error}") from error
 
 
 def _extract_rows(html: str) -> List[Dict[str, str]]:
@@ -191,7 +196,7 @@ def run_report(report_date: date, data_dir: Path) -> Digest:
     save_daily_orders(data_dir, report_date, todays_orders)
 
     prior_orders: List[Dict[str, str]] = []
-    for offset in (1, 2):
+    for offset in range(1, CARRYOVER_LOOKBACK_DAYS + 1):
         prior_orders.extend(load_daily_orders(data_dir, report_date - timedelta(days=offset)))
 
     return build_digest(report_date, todays_orders, prior_orders)
