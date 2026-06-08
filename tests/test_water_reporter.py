@@ -6,48 +6,55 @@ from pathlib import Path
 from water_reporter import build_digest, load_daily_orders, parse_sandstone_orders, save_daily_orders
 
 
-SAMPLE_HTML = """
-<html>
-  <body>
-    <table>
-      <tr><th>Canal</th><th>Member</th><th>Amount</th></tr>
-      <tr><td>Sandstone</td><td>Neighbor A</td><td>10</td></tr>
-      <tr><td>South Bench</td><td>Neighbor B</td><td>5</td></tr>
-      <tr><td>Sandstone Canal</td><td>Neighbor C</td><td>7</td></tr>
-    </table>
-  </body>
-</html>
+SAMPLE_PDF_TEXT = """
+Some header text
+
+Sandstone*
+*Sandstone
+12345
+Smith, John
+1.50
+*Sandstone
+67890
+Jones, Mary
+0.75
+Total Cfs (Sandstone) 2.25
+
+South Bench
+99999
+Other, Person
+3.00
 """
 
 
 class WaterReporterTests(unittest.TestCase):
     def test_parse_sandstone_orders_filters_to_sandstone(self):
-        orders = parse_sandstone_orders(SAMPLE_HTML)
+        orders = parse_sandstone_orders(SAMPLE_PDF_TEXT)
         self.assertEqual(2, len(orders))
-        self.assertEqual({"Neighbor A", "Neighbor C"}, {order["Member"] for order in orders})
+        self.assertEqual({"Smith, John", "Jones, Mary"}, {order["name"] for order in orders})
 
     def test_save_and_load_daily_orders(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             target_dir = Path(tmp_dir)
             report_date = date(2026, 5, 27)
-            expected_orders = [{"Canal": "Sandstone", "Member": "Neighbor A", "Amount": "10"}]
+            expected_orders = [{"acct_num": "12345", "ditch_gate": "Sandstone", "name": "Smith, John", "cfs": "1.50"}]
 
-            path = save_daily_orders(target_dir, report_date, expected_orders)
+            path = save_daily_orders(target_dir, report_date, expected_orders, "https://example.com/6-8.pdf")
 
             self.assertTrue(path.exists())
             self.assertEqual(expected_orders, load_daily_orders(target_dir, report_date))
 
     def test_build_digest_identifies_previous_order_flow(self):
-        todays = [{"Canal": "Sandstone", "Member": "Neighbor A", "Amount": "10"}]
+        todays = [{"acct_num": "12345", "ditch_gate": "Sandstone", "name": "Smith, John", "cfs": "1.50"}]
         prior = [
-            {"Canal": "Sandstone", "Member": "Neighbor A", "Amount": "8"},
-            {"Canal": "Sandstone", "Member": "Neighbor D", "Amount": "6"},
+            {"acct_num": "12345", "ditch_gate": "Sandstone", "name": "Smith, John", "cfs": "1.20"},
+            {"acct_num": "99999", "ditch_gate": "Sandstone", "name": "Jones, Mary", "cfs": "0.75"},
         ]
 
         digest = build_digest(date(2026, 5, 27), todays, prior)
 
-        self.assertEqual(["Neighbor A"], digest.active_today)
-        self.assertEqual(["Neighbor D"], digest.previous_order_flow)
+        self.assertEqual(["Smith, John"], digest.active_today)
+        self.assertEqual(["Jones, Mary"], digest.previous_order_flow)
         self.assertIn("Still receiving water", digest.body)
 
 
