@@ -24,6 +24,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
       - name: Run daily report
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
