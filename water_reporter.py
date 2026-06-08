@@ -12,7 +12,7 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import fitz  # pymupdf
@@ -31,8 +31,9 @@ def build_pdf_url(report_date: date) -> str:
 
 
 def fetch_pdf_bytes(url: str, timeout: int = 30) -> Optional[bytes]:
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; basin-water-reporter/1.0)"})
     try:
-        with urlopen(url, timeout=timeout) as response:
+        with urlopen(request, timeout=timeout) as response:
             return response.read()
     except HTTPError as error:
         if error.code == 404:
