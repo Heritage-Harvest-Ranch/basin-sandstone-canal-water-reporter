@@ -1,124 +1,87 @@
 #!/usr/bin/env python3
 import argparse
+import io
 import json
 import os
+import re
 import smtplib
 import ssl
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from email.message import EmailMessage
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Dict, List, Optional
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
-SOURCE_URL = "https://greybullvalleyid.com/water-orders/"
+import fitz  # pymupdf
+
+PDF_BASE_URL = "https://greybullvalleyid.com/wp-content/uploads"
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent / "data"
 MOUNTAIN_TZ = ZoneInfo("America/Denver")
 CARRYOVER_LOOKBACK_DAYS = 2
 
 
-def _normalize_text(value: str) -> str:
-    return " ".join(value.replace("\xa0", " ").split()).strip()
+def build_pdf_url(report_date: date) -> str:
+    return (
+        f"{PDF_BASE_URL}/{report_date.year}/{report_date.month:02d}"
+        f"/{report_date.month}-{report_date.day}.pdf"
+    )
 
 
-class TableParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self._in_table = False
-        self._in_row = False
-        self._in_cell = False
-        self._cell_text: List[str] = []
-        self._current_row: List[str] = []
-        self._current_table: List[List[str]] = []
-        self.tables: List[List[List[str]]] = []
-
-    def handle_starttag(self, tag: str, attrs) -> None:
-        if tag == "table":
-            self._in_table = True
-            self._current_table = []
-        elif self._in_table and tag == "tr":
-            self._in_row = True
-            self._current_row = []
-        elif self._in_row and tag in {"td", "th"}:
-            self._in_cell = True
-            self._cell_text = []
-
-    def handle_data(self, data: str) -> None:
-        if self._in_cell:
-            self._cell_text.append(data)
-
-    def handle_endtag(self, tag: str) -> None:
-        if self._in_cell and tag in {"td", "th"}:
-            self._in_cell = False
-            self._current_row.append(_normalize_text("".join(self._cell_text)))
-        elif self._in_row and tag == "tr":
-            self._in_row = False
-            if any(cell for cell in self._current_row):
-                self._current_table.append(self._current_row)
-        elif self._in_table and tag == "table":
-            self._in_table = False
-            if self._current_table:
-                self.tables.append(self._current_table)
-
-
-def fetch_water_orders_html(url: str = SOURCE_URL, timeout: int = 30) -> str:
+def fetch_pdf_bytes(url: str, timeout: int = 30) -> Optional[bytes]:
     try:
         with urlopen(url, timeout=timeout) as response:
-            return response.read().decode("utf-8", errors="replace")
+            return response.read()
+    except HTTPError as error:
+        if error.code == 404:
+            return None
+        raise RuntimeError(f"Unable to fetch report PDF from {url}: HTTP {error.code}") from error
     except URLError as error:
-        raise RuntimeError(f"Unable to fetch water orders from {url}: {error}") from error
+        raise RuntimeError(f"Unable to fetch report PDF from {url}: {error}") from error
 
 
-def _extract_rows(html: str) -> List[Dict[str, str]]:
-    parser = TableParser()
-    parser.feed(html)
-    extracted: List[Dict[str, str]] = []
-    for table in parser.tables:
-        headers = table[0]
-        data_rows = table[1:] if len(table) > 1 else []
-        if data_rows and len(set(headers)) > 1:
-            mapped_headers = [header or f"column_{i + 1}" for i, header in enumerate(headers)]
-        else:
-            mapped_headers = [f"column_{i + 1}" for i in range(len(headers))]
-            data_rows = table
-
-        for row in data_rows:
-            row_values = row + [""] * (len(mapped_headers) - len(row))
-            extracted.append(
-                {mapped_headers[i]: _normalize_text(value) for i, value in enumerate(row_values[: len(mapped_headers)])}
-            )
-    return extracted
+def extract_pdf_text(pdf_bytes: bytes) -> str:
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    return "\n".join(page.get_text() for page in doc)
 
 
-def parse_sandstone_orders(html: str) -> List[Dict[str, str]]:
-    rows = _extract_rows(html)
-    sandstone_orders = []
-    for row in rows:
-        if any("sandstone" in value.lower() for value in row.values() if value):
-            sandstone_orders.append(row)
-    return sandstone_orders
+def parse_sandstone_orders(text: str) -> List[Dict[str, str]]:
+    # pymupdf extracts each table cell on its own line; within the Sandstone*
+    # lateral section the pattern is: *Sandstone / acct_num / name / cfs
+    section_match = re.search(r"Sandstone\*\n(.*?)Total Cfs \(Sandstone\)", text, re.DOTALL)
+    if not section_match:
+        return []
+
+    lines = [l.strip() for l in section_match.group(1).splitlines() if l.strip()]
+    orders = []
+    i = 0
+    while i < len(lines):
+        if re.match(r"^\*?Sandstone", lines[i], re.IGNORECASE):
+            if (
+                i + 3 < len(lines)
+                and re.match(r"^\d+$", lines[i + 1])
+                and re.match(r"^[\d.]+$", lines[i + 3])
+            ):
+                orders.append({
+                    "acct_num": lines[i + 1],
+                    "ditch_gate": "Sandstone",
+                    "name": lines[i + 2],
+                    "cfs": lines[i + 3],
+                })
+                i += 4
+                continue
+        i += 1
+    return orders
 
 
-def _extract_member_name(order: Dict[str, str]) -> str:
-    preferred_keys = ("name", "member", "customer", "patron", "user")
-    for key, value in order.items():
-        if any(marker in key.lower() for marker in preferred_keys) and value:
-            return value
-    for value in order.values():
-        if value and "sandstone" not in value.lower():
-            return value
-    return "Unknown Member"
-
-
-def save_daily_orders(data_dir: Path, report_date: date, orders: List[Dict[str, str]]) -> Path:
+def save_daily_orders(data_dir: Path, report_date: date, orders: List[Dict[str, str]], source_url: str) -> Path:
     data_dir.mkdir(parents=True, exist_ok=True)
     target = data_dir / f"{report_date.isoformat()}.json"
     payload = {
         "date": report_date.isoformat(),
-        "source_url": SOURCE_URL,
+        "source_url": source_url,
         "sandstone_orders": orders,
     }
     target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -141,16 +104,21 @@ class Digest:
 
 
 def build_digest(report_date: date, todays_orders: List[Dict[str, str]], prior_two_days_orders: List[Dict[str, str]]) -> Digest:
-    active_today = sorted({_extract_member_name(order) for order in todays_orders})
-    prior_members = sorted({_extract_member_name(order) for order in prior_two_days_orders})
+    active_today = sorted({o["name"] for o in todays_orders})
+    prior_members = sorted({o["name"] for o in prior_two_days_orders})
     previous_order_flow = sorted(set(prior_members) - set(active_today))
+
+    today_by_name = {o["name"]: o for o in todays_orders}
 
     lines = [
         f"Sandstone Canal Water Report - {report_date.isoformat()}",
         "",
         "Active water orders today:",
     ]
-    lines.extend([f"- {member}" for member in active_today] or ["- None found"])
+    lines.extend(
+        [f"- {name} ({today_by_name[name]['cfs']} cfs)" for name in active_today]
+        or ["- None found"]
+    )
     lines.extend(["", "Still receiving water from orders placed in the previous two days:"])
     lines.extend([f"- {member}" for member in previous_order_flow] or ["- None identified"])
 
@@ -190,10 +158,15 @@ def send_digest_email(digest_text: str) -> bool:
     return True
 
 
-def run_report(report_date: date, data_dir: Path) -> Digest:
-    html = fetch_water_orders_html()
-    todays_orders = parse_sandstone_orders(html)
-    save_daily_orders(data_dir, report_date, todays_orders)
+def run_report(report_date: date, data_dir: Path) -> Optional[Digest]:
+    url = build_pdf_url(report_date)
+    pdf_bytes = fetch_pdf_bytes(url)
+    if pdf_bytes is None:
+        return None
+
+    text = extract_pdf_text(pdf_bytes)
+    todays_orders = parse_sandstone_orders(text)
+    save_daily_orders(data_dir, report_date, todays_orders, url)
 
     prior_orders: List[Dict[str, str]] = []
     for offset in range(1, CARRYOVER_LOOKBACK_DAYS + 1):
@@ -219,7 +192,16 @@ def main() -> int:
         return 0
 
     report_date = date.fromisoformat(args.date) if args.date else now_mt.date()
+
+    if report_date.weekday() == 6:
+        print(f"Skipping {report_date.isoformat()} — no report published on Sundays.")
+        return 0
+
     digest = run_report(report_date=report_date, data_dir=Path(args.data_dir))
+    if digest is None:
+        print(f"No report available for {report_date.isoformat()} (PDF not found).")
+        return 0
+
     print(digest.body)
 
     if send_digest_email(digest.body):
